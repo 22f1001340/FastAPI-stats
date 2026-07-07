@@ -1,47 +1,89 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import jwt
-from fastapi.responses import JSONResponse
+import os
+import yaml
+from dotenv import load_dotenv
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
 
-PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY
-cxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID
-EkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc
-WyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW
-ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
-SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
-dQIDAQAB
------END PUBLIC KEY-----"""
+# Allow browser requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-ISSUER = "https://idp.exam.local"
-AUDIENCE = "tds-li23z63v.apps.exam.local"
+load_dotenv()
+
+DEFAULTS = {
+    "port": 8000,
+    "workers": 1,
+    "debug": False,
+    "log_level": "info",
+    "api_key": "default-secret-000",
+}
 
 
-class TokenRequest(BaseModel):
-    token: str
+def to_bool(v):
+    if isinstance(v, bool):
+        return v
+    return str(v).lower() in ("true", "1", "yes", "on")
 
 
-@app.post("/verify")
-def verify(req: TokenRequest):
-    try:
-        payload = jwt.decode(
-            req.token,
-            PUBLIC_KEY,
-            algorithms=["RS256"],
-            issuer=ISSUER,
-            audience=AUDIENCE,
-        )
+def coerce(key, value):
+    if key in ("port", "workers"):
+        return int(value)
+    if key == "debug":
+        return to_bool(value)
+    return str(value)
 
-        return {
-            "valid": True,
-            "email": payload.get("email"),
-            "sub": payload.get("sub"),
-            "aud": payload.get("aud"),
-        }
 
-    except Exception:
-        return JSONResponse(
-            status_code=401,
-            content={"valid": False},
-        )
+@app.get("/effective-config")
+def effective_config(set: list[str] | None = Query(default=None)):
+    config = DEFAULTS.copy()
+
+    # YAML
+    if os.path.exists("config.development.yaml"):
+        with open("config.development.yaml") as f:
+            y = yaml.safe_load(f) or {}
+            for k, v in y.items():
+                config[k] = coerce(k, v)
+
+    # .env
+    mapping = {
+        "APP_PORT": "port",
+        "NUM_WORKERS": "workers",
+        "APP_DEBUG": "debug",
+        "APP_LOG_LEVEL": "log_level",
+        "APP_API_KEY": "api_key",
+    }
+
+    for env_name, key in mapping.items():
+        if env_name in os.environ:
+            config[key] = coerce(key, os.environ[env_name])
+
+    # OS env overrides
+    os_mapping = {
+        "APP_PORT": "port",
+        "APP_WORKERS": "workers",
+        "APP_DEBUG": "debug",
+        "APP_LOG_LEVEL": "log_level",
+        "APP_API_KEY": "api_key",
+    }
+
+    for env_name, key in os_mapping.items():
+        if env_name in os.environ:
+            config[key] = coerce(key, os.environ[env_name])
+
+    # CLI overrides
+    if set:
+        for item in set:
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            config[key] = coerce(key, value)
+
+    config["api_key"] = "****"
+
+    return config
